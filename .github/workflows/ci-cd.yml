@@ -12,7 +12,6 @@ permissions:
 
 env:
   SERVICE_NAME: auth-service
-  PUBLISH: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
 
 jobs:
   security-and-build:
@@ -98,7 +97,7 @@ jobs:
 
       # 8. Log in to GHCR
       - name: Log in to GHCR
-        if: env.PUBLISH == 'true'
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -108,7 +107,7 @@ jobs:
       # 9. Push Image to GHCR
       - name: Push Image to GHCR
         id: push
-        if: env.PUBLISH == 'true'
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         run: |
           IMAGE="ghcr.io/${{ github.repository }}"
           docker tag "${{ env.SERVICE_NAME }}:ci" "${IMAGE}:${GITHUB_SHA}"
@@ -122,14 +121,14 @@ jobs:
   deploy:
     name: Deploy to EC2 over SSM
     needs: security-and-build
-    if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       id-token: write
       contents: read
     concurrency:
-      group: deploy-${{ env.SERVICE_NAME }}
+      group: deploy-auth-service
       cancel-in-progress: false
     steps:
       - name: Checkout Source
