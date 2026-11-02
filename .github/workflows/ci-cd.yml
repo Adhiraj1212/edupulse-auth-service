@@ -72,7 +72,7 @@ jobs:
 
       # 6. Container Vulnerability Scanning
       - name: Scan Image with Trivy
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.28.0
         with:
           image-ref: ${{ env.SERVICE_NAME }}:ci
           severity: HIGH,CRITICAL
@@ -82,7 +82,7 @@ jobs:
 
       # 7. Generate CycloneDX SBOM
       - name: Generate CycloneDX SBOM
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.28.0
         with:
           image-ref: ${{ env.SERVICE_NAME }}:ci
           format: cyclonedx
