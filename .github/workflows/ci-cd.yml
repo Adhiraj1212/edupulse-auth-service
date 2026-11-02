@@ -115,9 +115,9 @@ jobs:
           docker tag "${{ env.SERVICE_NAME }}:ci" "${IMAGE}:latest"
           docker push "${IMAGE}:${GITHUB_SHA}"
           docker push "${IMAGE}:latest"
-          DIGEST=$(docker inspect --format '{{index .RepoDigests 0}}' "${IMAGE}:${GITHUB_SHA}")
-          echo "image_ref=${DIGEST}" >> "$GITHUB_OUTPUT"
-          echo "pushed \`${IMAGE}:${GITHUB_SHA}\` (\`${DIGEST}\`)" >> "$GITHUB_STEP_SUMMARY"
+          IMAGE_REF="${IMAGE}:${GITHUB_SHA}"
+          echo "image_ref=${IMAGE_REF}" >> "$GITHUB_OUTPUT"
+          echo "pushed \`${IMAGE_REF}\`" >> "$GITHUB_STEP_SUMMARY"
 
   deploy:
     name: Deploy to EC2 over SSM
