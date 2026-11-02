@@ -1,0 +1,12 @@
+node_modules
+.git
+.github
+.gitignore
+.dockerignore
+.gitleaks.toml
+.hadolint.yaml
+README.md
+docker-compose.yml
+.env
+.env.local
+.DS_Store

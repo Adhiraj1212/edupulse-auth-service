@@ -1,0 +1,8 @@
+failure-threshold: warning
+trustedRegistries:
+  - docker.io
+  - public.ecr.aws
+  - gcr.io
+ignored:
+  - DL3018
+  - DL3017

@@ -1,0 +1,189 @@
+name: auth-service-ci-cd
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  SERVICE_NAME: auth-service
+  IMAGE_NAME: edupulse/auth-service
+  MIN_COUNT: 2
+  PUBLISH: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+
+jobs:
+  security-and-build:
+    name: Security Scan, Build & Sign
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write # AWS OIDC & Cosign
+    outputs:
+      image: ${{ steps.ref.outputs.image }}
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # 1. Secret Scanning
+      - name: Secret Scan (Gitleaks)
+        run: |
+          docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:latest detect --source /repo --redact --no-banner --verbose
+
+      # 2. Node.js Setup, Dependency Audit & SAST Syntax Check
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install, Audit Dependencies & Validate Syntax
+        run: |
+          npm ci
+          npm audit --omit=dev --audit-level=high
+          find . -name '*.js' -not -path './node_modules/*' -print0 | xargs -0 -n1 node --check
+
+      # 3. Dockerfile Linting
+      - name: Dockerfile Lint (Hadolint)
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+          config: .hadolint.yaml
+          failure-threshold: warning
+
+      # 4. Buildx Setup
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # 5. Build Container Image
+      - name: Build Container Image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: ${{ env.SERVICE_NAME }}:ci
+          cache-from: type=gha,scope=${{ env.SERVICE_NAME }}
+          cache-to: type=gha,mode=max,scope=${{ env.SERVICE_NAME }}
+
+      # 6. Container Vulnerability Scanning
+      - name: Scan Image with Trivy (Fails on HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.SERVICE_NAME }}:ci
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+
+      # 7. Generate CycloneDX SBOM
+      - name: Generate CycloneDX SBOM
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.SERVICE_NAME }}:ci
+          format: cyclonedx
+          output: sbom-${{ env.SERVICE_NAME }}.cdx.json
+
+      - name: Upload SBOM Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ env.SERVICE_NAME }}
+          path: sbom-${{ env.SERVICE_NAME }}.cdx.json
+          retention-days: 90
+
+      # ---------- Publish & Sign (Main Branch Only) ----------
+      - name: Configure AWS Credentials (OIDC Push Role)
+        if: env.PUBLISH == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_PUSH }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        if: env.PUBLISH == 'true'
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Push Image to ECR
+        id: push
+        if: env.PUBLISH == 'true'
+        run: |
+          IMAGE="${{ vars.ECR_REGISTRY }}/${IMAGE_NAME}:${GITHUB_SHA}"
+          docker tag "${{ env.SERVICE_NAME }}:ci" "$IMAGE"
+          docker push "$IMAGE"
+          DIGEST=$(aws ecr describe-images --repository-name "$IMAGE_NAME" \
+            --image-ids imageTag="$GITHUB_SHA" --query 'imageDetails[0].imageDigest' --output text)
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "pushed \`$IMAGE\` (\`$DIGEST\`)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Install Cosign
+        if: env.PUBLISH == 'true'
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign Image (Keyless Sigstore via OIDC)
+        if: env.PUBLISH == 'true'
+        run: cosign sign --yes "${{ vars.ECR_REGISTRY }}/${IMAGE_NAME}@${{ steps.push.outputs.digest }}"
+
+      - name: Pass Image Reference to Deploy
+        id: ref
+        if: env.PUBLISH == 'true'
+        run: echo "image=${{ steps.push.outputs.image }}" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    name: Deploy to Amazon ECS
+    needs: security-and-build
+    if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment: prod # Manual approval gate
+    concurrency:
+      group: deploy-${{ env.SERVICE_NAME }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Configure AWS Credentials (OIDC Deploy Role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_DEPLOY }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Fetch Current ECS Task Definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition "${{ vars.ECS_CLUSTER }}-${{ env.SERVICE_NAME }}" \
+            --query taskDefinition > task-definition.json
+
+      - name: Render New Task Definition with Updated Image
+        id: render
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: ${{ env.SERVICE_NAME }}
+          image: ${{ needs.security-and-build.outputs.image }}
+
+      - name: Deploy Task Definition (Rolling Update)
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render.outputs.task-definition }}
+          service: ${{ env.SERVICE_NAME }}
+          cluster: ${{ vars.ECS_CLUSTER }}
+          wait-for-service-stability: true
+
+      - name: Ensure Desired Task Count
+        run: |
+          CURRENT=$(aws ecs describe-services --cluster "${{ vars.ECS_CLUSTER }}" \
+            --services "${{ env.SERVICE_NAME }}" --query 'services[0].desiredCount' --output text)
+          if [ "$CURRENT" = "0" ]; then
+            aws ecs update-service --cluster "${{ vars.ECS_CLUSTER }}" --service "${{ env.SERVICE_NAME }}" \
+              --desired-count ${{ env.MIN_COUNT }} > /dev/null
+            aws ecs wait services-stable --cluster "${{ vars.ECS_CLUSTER }}" --services "${{ env.SERVICE_NAME }}"
+          fi

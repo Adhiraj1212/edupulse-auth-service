@@ -1,0 +1,11 @@
+title = "edupulse-auth-service gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Known-safe paths and documentation"
+paths = [
+  '''README\.md$''',
+  '''\.example$''',
+]

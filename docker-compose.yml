@@ -1,0 +1,18 @@
+services:
+  auth-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "4000:4000"
+    environment:
+      REDIS_URL: "redis://host.docker.internal:6379"
+      REDIS_PASSWORD: "change_me"
+      RABBITMQ_URL: "amqp://edupulse:change_me@host.docker.internal:5672"
+      ADMIN_USER: "admin"
+      ADMIN_PASSWORD: "change_me"
+      STUDENT_USER: "student"
+      STUDENT_PASSWORD: "change_me"
+      COOKIE_SECURE: "false"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
