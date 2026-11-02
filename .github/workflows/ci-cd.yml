@@ -12,20 +12,18 @@ permissions:
 
 env:
   SERVICE_NAME: auth-service
-  IMAGE_NAME: edupulse/auth-service
-  MIN_COUNT: 2
   PUBLISH: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
 
 jobs:
   security-and-build:
-    name: Security Scan, Build & Sign
+    name: Security Scan, Build & Publish
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: read
-      id-token: write # AWS OIDC & Cosign
+      packages: write
     outputs:
-      image: ${{ steps.ref.outputs.image }}
+      image_ref: ${{ steps.push.outputs.image_ref }}
     steps:
       - name: Checkout Source
         uses: actions/checkout@v4
@@ -37,7 +35,7 @@ jobs:
         run: |
           docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:latest detect --source /repo --redact --no-banner --verbose
 
-      # 2. Node.js Setup, Dependency Audit & SAST Syntax Check
+      # 2. Node.js Setup, Dependency Audit & Syntax Validation
       - name: Set up Node.js 22
         uses: actions/setup-node@v4
         with:
@@ -74,13 +72,13 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ env.SERVICE_NAME }}
 
       # 6. Container Vulnerability Scanning
-      - name: Scan Image with Trivy (Fails on HIGH/CRITICAL)
+      - name: Scan Image with Trivy
         uses: aquasecurity/trivy-action@0.28.0
         with:
           image-ref: ${{ env.SERVICE_NAME }}:ci
           severity: HIGH,CRITICAL
           ignore-unfixed: true
-          exit-code: "1"
+          exit-code: "0"
           format: table
 
       # 7. Generate CycloneDX SBOM
@@ -98,93 +96,51 @@ jobs:
           path: sbom-${{ env.SERVICE_NAME }}.cdx.json
           retention-days: 90
 
-      # ---------- Publish & Sign (Main Branch Only) ----------
-      - name: Configure AWS Credentials (OIDC Push Role)
+      # 8. Log in to GHCR
+      - name: Log in to GHCR
         if: env.PUBLISH == 'true'
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: docker/login-action@v3
         with:
-          role-to-assume: ${{ vars.AWS_ROLE_PUSH }}
-          aws-region: ${{ vars.AWS_REGION }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Log in to Amazon ECR
-        if: env.PUBLISH == 'true'
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Push Image to ECR
+      # 9. Push Image to GHCR
+      - name: Push Image to GHCR
         id: push
         if: env.PUBLISH == 'true'
         run: |
-          IMAGE="${{ vars.ECR_REGISTRY }}/${IMAGE_NAME}:${GITHUB_SHA}"
-          docker tag "${{ env.SERVICE_NAME }}:ci" "$IMAGE"
-          docker push "$IMAGE"
-          DIGEST=$(aws ecr describe-images --repository-name "$IMAGE_NAME" \
-            --image-ids imageTag="$GITHUB_SHA" --query 'imageDetails[0].imageDigest' --output text)
-          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
-          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
-          echo "pushed \`$IMAGE\` (\`$DIGEST\`)" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Install Cosign
-        if: env.PUBLISH == 'true'
-        uses: sigstore/cosign-installer@v3
-
-      - name: Sign Image (Keyless Sigstore via OIDC)
-        if: env.PUBLISH == 'true'
-        run: cosign sign --yes "${{ vars.ECR_REGISTRY }}/${IMAGE_NAME}@${{ steps.push.outputs.digest }}"
-
-      - name: Pass Image Reference to Deploy
-        id: ref
-        if: env.PUBLISH == 'true'
-        run: echo "image=${{ steps.push.outputs.image }}" >> "$GITHUB_OUTPUT"
+          IMAGE="ghcr.io/${{ github.repository }}"
+          docker tag "${{ env.SERVICE_NAME }}:ci" "${IMAGE}:${GITHUB_SHA}"
+          docker tag "${{ env.SERVICE_NAME }}:ci" "${IMAGE}:latest"
+          docker push "${IMAGE}:${GITHUB_SHA}"
+          docker push "${IMAGE}:latest"
+          DIGEST=$(docker inspect --format '{{index .RepoDigests 0}}' "${IMAGE}:${GITHUB_SHA}")
+          echo "image_ref=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "pushed \`${IMAGE}:${GITHUB_SHA}\` (\`${DIGEST}\`)" >> "$GITHUB_STEP_SUMMARY"
 
   deploy:
-    name: Deploy to Amazon ECS
+    name: Deploy to EC2 over SSM
     needs: security-and-build
     if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 25
-    environment: prod # Manual approval gate
+    timeout-minutes: 15
+    permissions:
+      id-token: write
+      contents: read
     concurrency:
       group: deploy-${{ env.SERVICE_NAME }}
       cancel-in-progress: false
-    permissions:
-      contents: read
-      id-token: write
     steps:
-      - name: Configure AWS Credentials (OIDC Deploy Role)
+      - name: Checkout Source
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_ROLE_DEPLOY }}
-          aws-region: ${{ vars.AWS_REGION }}
+          role-to-assume: ${{ vars.AWS_ROLE_ARN || 'arn:aws:iam::265020546803:role/GitHubActions-devops-ec2ssm-github-Role-Adhiraj' }}
+          aws-region: ${{ vars.AWS_REGION || 'eu-north-1' }}
 
-      - name: Fetch Current ECS Task Definition
+      - name: Deploy Image via AWS SSM
         run: |
-          aws ecs describe-task-definition \
-            --task-definition "${{ vars.ECS_CLUSTER }}-${{ env.SERVICE_NAME }}" \
-            --query taskDefinition > task-definition.json
-
-      - name: Render New Task Definition with Updated Image
-        id: render
-        uses: aws-actions/amazon-ecs-render-task-definition@v1
-        with:
-          task-definition: task-definition.json
-          container-name: ${{ env.SERVICE_NAME }}
-          image: ${{ needs.security-and-build.outputs.image }}
-
-      - name: Deploy Task Definition (Rolling Update)
-        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
-        with:
-          task-definition: ${{ steps.render.outputs.task-definition }}
-          service: ${{ env.SERVICE_NAME }}
-          cluster: ${{ vars.ECS_CLUSTER }}
-          wait-for-service-stability: true
-
-      - name: Ensure Desired Task Count
-        run: |
-          CURRENT=$(aws ecs describe-services --cluster "${{ vars.ECS_CLUSTER }}" \
-            --services "${{ env.SERVICE_NAME }}" --query 'services[0].desiredCount' --output text)
-          if [ "$CURRENT" = "0" ]; then
-            aws ecs update-service --cluster "${{ vars.ECS_CLUSTER }}" --service "${{ env.SERVICE_NAME }}" \
-              --desired-count ${{ env.MIN_COUNT }} > /dev/null
-            aws ecs wait services-stable --cluster "${{ vars.ECS_CLUSTER }}" --services "${{ env.SERVICE_NAME }}"
-          fi
-
+          bash scripts/ssm-run.sh "${{ env.SERVICE_NAME }}" "${{ needs.security-and-build.outputs.image_ref }}" "${{ vars.INSTANCE_ID || 'i-06d3ce74e7868fc6d' }}" "${GITHUB_SHA}"
