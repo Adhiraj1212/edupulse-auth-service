@@ -23,3 +23,4 @@ log "Tagging and pushing ${REGISTRY}/${REPO}:${TAG}..."
 docker tag "${PROJECT}/${COMPONENT}:${TAG}" "${REGISTRY}/${REPO}:${TAG}"
 docker push "${REGISTRY}/${REPO}:${TAG}"
 log "Successfully pushed to ECR: ${REGISTRY}/${REPO}:${TAG}"
+

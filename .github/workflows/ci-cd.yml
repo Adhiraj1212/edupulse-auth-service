@@ -187,3 +187,4 @@ jobs:
               --desired-count ${{ env.MIN_COUNT }} > /dev/null
             aws ecs wait services-stable --cluster "${{ vars.ECS_CLUSTER }}" --services "${{ env.SERVICE_NAME }}"
           fi
+

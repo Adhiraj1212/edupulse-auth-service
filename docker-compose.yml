@@ -16,3 +16,4 @@ services:
       COOKIE_SECURE: "false"
     extra_hosts:
       - "host.docker.internal:host-gateway"
+

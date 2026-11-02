@@ -16,3 +16,4 @@ need() { has "$1" || die "required tool not found: $1"; }
 repo_root() { cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd; }
 aws_account_id() { aws sts get-caller-identity --query Account --output text; }
 ecr_registry() { printf '%s.dkr.ecr.%s.amazonaws.com' "$(aws_account_id)" "${AWS_REGION}"; }
+
