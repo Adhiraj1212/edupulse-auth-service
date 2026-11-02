@@ -109,7 +109,8 @@ jobs:
         id: push
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         run: |
-          IMAGE="ghcr.io/${{ github.repository }}"
+          REPO_LOWER=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          IMAGE="ghcr.io/${REPO_LOWER}"
           docker tag "${{ env.SERVICE_NAME }}:ci" "${IMAGE}:${GITHUB_SHA}"
           docker tag "${{ env.SERVICE_NAME }}:ci" "${IMAGE}:latest"
           docker push "${IMAGE}:${GITHUB_SHA}"
