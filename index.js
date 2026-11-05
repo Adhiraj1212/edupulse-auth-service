@@ -62,6 +62,7 @@ app.set("trust proxy", true); // only nginx can reach this service
 app.use(express.json());
 
 app.get("/health", (req, res) => res.json({ status: "ok" }));
+app.get("/healthz", (req, res) => res.json({ status: "ok" }));
 
 app.post("/api/login", async (req, res) => {
   const failKey = `fail:${req.ip}`;
